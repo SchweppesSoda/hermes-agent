@@ -20,6 +20,7 @@ export type SidebarActions = Pick<
   | 'onManageCronJob'
   | 'onNavigate'
   | 'onNewSessionInWorkspace'
+  | 'onNewSessionSplit'
   | 'onResumeSession'
   | 'onTriggerCronJob'
 >

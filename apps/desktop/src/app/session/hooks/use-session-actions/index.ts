@@ -2,6 +2,7 @@ import type { MutableRefObject } from 'react'
 import { useCallback, useRef } from 'react'
 import type { NavigateFunction } from 'react-router-dom'
 
+import { revealTreePane } from '@/components/pane-shell/tree/store'
 import { deleteSession, getSessionMessages, setSessionArchived } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
@@ -41,7 +42,7 @@ import {
   setYoloActive,
   workspaceCwdForNewSession
 } from '@/store/session'
-import { closeSessionTile, dropSessionState, publishSessionState } from '@/store/session-states'
+import { closeSessionTile, dropSessionState, openSessionTile, patchSessionTile, publishSessionState, type SplitDir } from '@/store/session-states'
 import { broadcastSessionsChanged } from '@/store/session-sync'
 import { isWatchWindow } from '@/store/windows'
 import type { SessionCreateResponse, SessionResumeResponse, UsageStats } from '@/types/hermes'
@@ -271,6 +272,64 @@ export function useSessionActions({
       }
     },
     [navigate, startFreshSessionDraft]
+  )
+
+  /** Create a fresh session and open it as a tile — leaves the primary chat alone.
+   *  Used by the New session row's "Open in split" menu (and any future
+   *  "new chat beside" affordance). */
+  const openNewSessionTile = useCallback(
+    async (dir: SplitDir = 'right') => {
+      const newChatProfile = $newChatProfile.get() ?? normalizeProfileKey($activeGatewayProfile.get())
+
+      try {
+        await ensureGatewayProfile(newChatProfile)
+
+        const cwd = resolveNewSessionCwd().trim() || workspaceCwdForNewSession()
+        const uiModel = $currentModel.get().trim()
+        const uiProvider = $currentProvider.get().trim()
+        const uiEffort = $currentReasoningEffort.get().trim()
+        const uiFast = $currentFastMode.get()
+
+        const created = await requestGateway<SessionCreateResponse>('session.create', {
+          cols: 96,
+          source: 'desktop',
+          ...(cwd && { cwd }),
+          ...(newChatProfile ? { profile: newChatProfile } : {}),
+          ...(uiModel ? { model: uiModel, ...(uiProvider ? { provider: uiProvider } : {}) } : {}),
+          ...(uiEffort ? { reasoning_effort: uiEffort } : {}),
+          ...(uiFast ? { fast: true } : {})
+        })
+
+        const stored = created.stored_session_id
+
+        if (!stored) {
+          await requestGateway('session.close', { session_id: created.session_id }).catch(() => undefined)
+          notify({ kind: 'error', title: copy.sessionUnavailable, message: copy.createSessionFailed })
+
+          return
+        }
+
+        // Seed the sidebar + the per-runtime cache, but do NOT steal the
+        // primary selection — this session lives in the tile.
+        upsertOptimisticSession(created, stored, null, null)
+
+        const runtimeInfo = applyRuntimeInfo(created.info)
+
+        updateSessionState(
+          created.session_id,
+          state => (runtimeInfo ? { ...state, ...runtimeInfo } : state),
+          stored
+        )
+
+        openSessionTile(stored, dir)
+        patchSessionTile(stored, { runtimeId: created.session_id })
+        revealTreePane(`session-tile:${stored}`)
+        broadcastSessionsChanged()
+      } catch (error) {
+        notifyError(error, copy.createSessionFailed)
+      }
+    },
+    [copy, requestGateway, updateSessionState]
   )
 
   const openSettings = useCallback(() => {
@@ -962,6 +1021,7 @@ export function useSessionActions({
     branchStoredSession,
     closeSettings,
     createBackendSessionForSend,
+    openNewSessionTile,
     openSettings,
     removeSession,
     resumeSession,
